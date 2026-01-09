@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Migrates Zoom cloud recordings to SharePoint.
 
@@ -37,6 +37,25 @@ function Get-ZoomAccessToken {
     return $response.access_token
 }
 
+
+function Test-ZoomRecordingsEndpoint {
+    param(
+        [Parameter(Mandatory=$true)][string]$ZoomAccessToken
+    )
+
+    # Minimal call: last 7 days for the authorised user
+    $to   = (Get-Date).ToString("yyyy-MM-dd")
+    $from = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd")
+    $uri  = "https://api.zoom.us/v2/users/me/recordings?from=$from&to=$to&page_size=30"
+
+    try {
+        Invoke-RestMethod -Method Get -Uri $uri -Headers @{ Authorization = "Bearer $ZoomAccessToken" } -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
 function Get-GraphAccessToken {
     $clientId     = [System.Environment]::GetEnvironmentVariable("GRAPH_CLIENT_ID")
     $clientSecret = [System.Environment]::GetEnvironmentVariable("GRAPH_CLIENT_SECRET")
@@ -88,30 +107,22 @@ function Get-ZoomAccountRecordings {
 
 function Invoke-Migration {
     Load-Env
-
     $zoomToken  = Get-ZoomAccessToken
     $graphToken = Get-GraphAccessToken
 
-    $zoomOk  = ([string]::IsNullOrEmpty($zoomToken)  -eq $false)
+    $zoomOk  = ([string]::IsNullOrEmpty($zoomToken) -eq $false)
     $graphOk = ([string]::IsNullOrEmpty($graphToken) -eq $false)
 
-    if (-not $zoomOk)  { "? Zoom token not acquired"; return }
-    if (-not $graphOk) { "? Graph token not acquired"; return }
+    Write-Host ("Zoom token acquired: " + $zoomOk)
+    Write-Host ("Graph token acquired: " + $graphOk)
 
-    # Smoke test: list account recordings for a small window (last 7 days)
-    $to   = (Get-Date).ToString("yyyy-MM-dd")
-    $from = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd")
+    if (-not $zoomOk) { Write-Host "❌ FAIL Zoom token missing"; return }
+    if (-not $graphOk) { Write-Host "❌ FAIL Graph token missing"; return }
 
-    try {
-        $meetings = Get-ZoomAccountRecordings -ZoomToken $zoomToken -FromDate $from -ToDate $to
-        if ($meetings -and $meetings.Count -ge 0) {
-            "? Zoom account recordings reachable (meetings returned: $($meetings.Count))"
-        } else {
-            "? Zoom account recordings call returned no data"
-        }
-    } catch {
-        "? Zoom account recordings call failed"
-    }
+    $recOk = Test-ZoomRecordingsEndpoint -ZoomAccessToken $zoomToken
+    if ($recOk) { Write-Host "✅ OK Zoom recordings endpoint works (users/me/recordings)" }
+    else { Write-Host "❌ FAIL Zoom recordings endpoint call failed" }
 }
 
 Invoke-Migration
+
