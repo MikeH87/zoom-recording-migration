@@ -73,56 +73,20 @@ function Get-GraphAccessToken {
 
     return $response.access_token
 }
-
-# Read-only: list recordings at account level (paginated). Does NOT download/delete.
-function Get-ZoomAccountRecordings {
-    param(
-        [Parameter(Mandatory=$true)][string]$ZoomToken,
-        [Parameter(Mandatory=$true)][string]$FromDate,  # yyyy-mm-dd
-        [Parameter(Mandatory=$true)][string]$ToDate     # yyyy-mm-dd
-    )
-
-    $accountId = [System.Environment]::GetEnvironmentVariable("ZOOM_ACCOUNT_ID")
-    $baseUrl   = "https://api.zoom.us/v2/accounts/$accountId/recordings"
-    $headers   = @{ Authorization = "Bearer $ZoomToken" }
-
-    $allMeetings = New-Object System.Collections.Generic.List[object]
-    $next = $null
-
-    do {
-        $uri = "$baseUrl?from=$FromDate&to=$ToDate&page_size=300"
-        if ($next) { $uri = "$uri&next_page_token=$next" }
-
-        $resp = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
-
-        if ($resp -and $resp.meetings) {
-            foreach ($m in $resp.meetings) { $allMeetings.Add($m) }
-        }
-
-        $next = $resp.next_page_token
-    } while ($next)
-
-    return $allMeetings
-}
-
 function Invoke-Migration {
     Load-Env
+
     $zoomToken  = Get-ZoomAccessToken
     $graphToken = Get-GraphAccessToken
 
-    $zoomOk  = ([string]::IsNullOrEmpty($zoomToken) -eq $false)
-    $graphOk = ([string]::IsNullOrEmpty($graphToken) -eq $false)
+    if ([string]::IsNullOrEmpty($zoomToken))  { "❌ FAIL Zoom token missing"; return }
+    if ([string]::IsNullOrEmpty($graphToken)) { "❌ FAIL Graph token missing"; return }
 
-    Write-Host ("Zoom token acquired: " + $zoomOk)
-    Write-Host ("Graph token acquired: " + $graphOk)
-
-    if (-not $zoomOk) { Write-Host "❌ FAIL Zoom token missing"; return }
-    if (-not $graphOk) { Write-Host "❌ FAIL Graph token missing"; return }
-
-    $recOk = Test-ZoomRecordingsEndpoint -ZoomAccessToken $zoomToken
-    if ($recOk) { Write-Host "✅ OK Zoom recordings endpoint works (users/me/recordings)" }
-    else { Write-Host "❌ FAIL Zoom recordings endpoint call failed" }
+    $ok = Test-ZoomRecordingsEndpoint -ZoomAccessToken $zoomToken
+    if ($ok) { "✅ OK Zoom recordings endpoint works (users/me/recordings)" }
+    else     { "❌ FAIL Zoom recordings endpoint call failed" }
 }
 
 Invoke-Migration
+
 
