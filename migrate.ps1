@@ -389,7 +389,8 @@ $end   = [DateTime]::ParseExact($ToDate,   "yyyy-MM-dd", $null)
 if ($end -lt $start) { throw "TO_DATE ($ToDate) is earlier than FROM_DATE ($FromDate)" }
 
 $totalUploaded = 0
-$totalProcessed = 0
+$totalProcessed = 0
+$processedUuids = [System.Collections.Generic.HashSet[string]]::new()
 $maxRecordings = if ($env:MAX_RECORDINGS) { [int]$env:MAX_RECORDINGS } else { 0 }
 
 $cursor = $start
@@ -408,13 +409,21 @@ while ($cursor -le $end) {
 
     $meetings = @()
     try {
-      $meetings = Get-ZoomRecordingsForUser -UserId $u.id -From $fromStr -To $toStr -Headers $zoomHeaders
+      $meetings = Get-ZoomRecordingsForUser -UserId $u.id -From $fromStr -To $toStr -Headers $zoomHeaders
+      # De-dupe: Zoom can return duplicate meeting instances; uuid is the stable unique key
+      $meetings = @($meetings | Where-Object { $_ -and $_.uuid } | Sort-Object uuid -Unique)
     } catch {
       Write-Log "WARN: failed recordings list for user $($u.id) ($hostEmail): $($_.Exception.Message)"
       continue
     }
 
-    foreach ($m in $meetings) {
+    foreach ($m in $meetings) {
+      if (-not $m.uuid) { continue }
+      if (-not $processedUuids.Add([string]$m.uuid)) {
+        Write-Log ("SKIP (duplicate uuid): {0} (host: {1})" -f $m.uuid, $hostEmail)
+        Write-RunCsv -Action "skipped" -MeetingId "$($m.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso "" -Topic ($m.topic) -LocalPath "" -SharePointPath "" -Notes "duplicate_uuid"
+        continue
+      }
       if ($maxRecordings -gt 0 -and $totalProcessed -ge $maxRecordings) { break }
 
       $totalProcessed++
@@ -526,6 +535,8 @@ try {
     Start-Sleep -Seconds $keep
   }
 } catch { }
+
+
 
 
 
