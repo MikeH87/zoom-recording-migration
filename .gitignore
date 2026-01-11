@@ -1,5 +1,11 @@
-
-
+# secrets / credentials
 .env
+*.env
+mg-credentials.json
 
-temp_downloads/
+# runtime outputs
+tmp/
+*.log
+last-run.log
+migration.log
+run-actions-*.csv
