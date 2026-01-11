@@ -236,8 +236,15 @@ function Get-ExternalParticipantsLabel {
 
 function New-SafeFileName {
   param([Parameter(Mandatory)][string]$Name)
-  # Windows invalid: \ / : * ? " < > |
-  ($Name -replace '[\\/:*?"<>|]', '_').Trim()
+
+  # SharePoint/OneDrive are stricter than Windows. In particular, # and % often cause Graph path errors.
+  $safe = ($Name -replace '[\\/:*?"<>|#%]', '_').Trim()
+
+  # Also avoid trailing dots/spaces which SharePoint rejects
+  $safe = $safe.TrimEnd(' ','.')
+
+  if ([string]::IsNullOrWhiteSpace($safe)) { $safe = "Untitled" }
+  return $safe
 }
 
 function Truncate-FileName {
@@ -501,4 +508,5 @@ try {
     Start-Sleep -Seconds $keep
   }
 } catch { }
+
 
