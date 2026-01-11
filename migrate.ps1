@@ -370,8 +370,8 @@ $excluded = @()
 if ($env:EXCLUDED_HOST_EMAILS) {
   $excluded = @($env:EXCLUDED_HOST_EMAILS -split "," | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
 }
-
-$users = Get-ZoomUsers -Headers $zoomHeaders
+$zoomUserParams = @{ Headers = $zoomHeaders }
+$users = Get-ZoomUsers @zoomUserParams
 if ($env:MAX_USERS) { $users = $users | Select-Object -First ([int]$env:MAX_USERS) }
 
 $users = $users | Where-Object {
@@ -535,6 +535,7 @@ try {
     Start-Sleep -Seconds $keep
   }
 } catch { }
+
 
 
 
