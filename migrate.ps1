@@ -105,6 +105,16 @@ function Get-ZoomAccessToken {
 }
 
 function Invoke-ZoomGet {
+
+function Encode-ZoomMeetingUuid {
+  param([Parameter(Mandatory)][string]$Uuid)
+
+  # Zoom UUIDs can contain "/" and must be URL-encoded. Some endpoints require double-encoding.
+  $once = [System.Uri]::EscapeDataString($Uuid)
+  $twice = [System.Uri]::EscapeDataString($once)
+  return $twice
+}
+
   param(
     [Parameter(Mandatory)][string]$Uri,
     [Parameter(Mandatory)][hashtable]$Headers
@@ -162,10 +172,11 @@ function Get-ZoomRecordingsForUser {
 
 function Get-ZoomMeetingRecordingsDetail {
   param(
-    [Parameter(Mandatory)][string]$MeetingId,
+    [Parameter(Mandatory)][string]$MeetingUuid,
     [Parameter(Mandatory)][hashtable]$Headers
   )
-  Invoke-ZoomGet -Uri "https://api.zoom.us/v2/meetings/$MeetingId/recordings" -Headers $Headers
+  $enc = Encode-ZoomMeetingUuid -Uuid $MeetingUuid
+  Invoke-ZoomGet -Uri "https://api.zoom.us/v2/meetings/$enc/recordings" -Headers $Headers
 }
 
 function Get-MeetingParticipantsEmails {
@@ -308,11 +319,11 @@ function Download-ZoomRecording {
 
 function Remove-ZoomRecording {
   param(
-    [Parameter(Mandatory)][string]$MeetingId,
+    [Parameter(Mandatory)][string]$MeetingUuid,
     [Parameter(Mandatory)][hashtable]$Headers
   )
-  # Delete all recordings for a meeting
-  Invoke-RestMethod -Method Delete -Uri "https://api.zoom.us/v2/meetings/$MeetingId/recordings?action=trash" -Headers $Headers | Out-Null
+  $enc = Encode-ZoomMeetingUuid -Uuid $MeetingUuid
+  Invoke-RestMethod -Method Delete -Uri "https://api.zoom.us/v2/meetings/$enc/recordings?action=trash" -Headers $Headers | Out-Null
 }
 
 function Upload-RunLogsToSharePoint {
@@ -411,7 +422,7 @@ while ($cursor -le $end) {
       # Get full recording detail (includes recording_files)
       $full = $null
       try {
-        $full = Get-ZoomMeetingRecordingsDetail -MeetingId $m.id -Headers $zoomHeaders
+        $full = Get-ZoomMeetingRecordingsDetail -MeetingUuid $m.uuid -Headers $zoomHeaders
       } catch {
         Write-Log "WARN: failed to fetch meeting recordings detail for $($m.id): $($_.Exception.Message)"
         Write-RunCsv -Action "error" -MeetingId "$($m.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso "" -Topic ($m.topic) -LocalPath "" -SharePointPath "" -Notes "detail_fetch_failed"
@@ -421,6 +432,13 @@ while ($cursor -le $end) {
       if (-not $full -or -not $full.start_time) { continue }
 
       $dt = [DateTime]$full.start_time
+
+# Guard: enforce date window (protects against Zoom returning other instances for the same meeting)
+if ($dt -lt $start -or $dt -gt $end) {
+  Write-Log ("SKIP (outside range): {0} [{1}] (host: {2})" -f $full.topic, $dt.ToString("yyyy-MM-dd HH:mm"), $hostEmail)
+  Write-RunCsv -Action "skipped" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath "" -SharePointPath "" -Notes "outside_date_window"
+  continue
+}
       Write-Log ("Processing: {0} [{1}] (host: {2})" -f $full.topic, $dt.ToString("yyyy-MM-dd HH:mm"), $hostEmail)
 
       $participants = @()
@@ -456,7 +474,7 @@ while ($cursor -le $end) {
 
         if (-not $DryRun -and $DeleteFromZoom) {
           try {
-            Remove-ZoomRecording -MeetingId "$($full.id)" -Headers $zoomHeaders
+            Remove-ZoomRecording -MeetingUuid $m.uuid -Headers $zoomHeaders
             Write-Log "Deleted from Zoom: meeting $($full.id)"
             Write-RunCsv -Action "deleted" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath $localFile -SharePointPath $folderPath -Notes ""
           } catch {
@@ -508,5 +526,6 @@ try {
     Start-Sleep -Seconds $keep
   }
 } catch { }
+
 
 
