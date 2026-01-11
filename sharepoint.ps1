@@ -93,7 +93,7 @@ function Upload-ToSharePoint {
 
   # Simple upload works up to 4MB; use upload session for larger
   if ($size -le 4MB) {
-    $putUrl = "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root:/$encodedPath:/content"
+    $putUrl = "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root:/${encodedPath}:/content"
     try {
       Invoke-RestMethod -Method Put -Uri $putUrl -Headers $headers -InFile $LocalFilePath -ContentType "application/octet-stream" | Out-Null
       return $true
@@ -104,7 +104,7 @@ function Upload-ToSharePoint {
   }
 
   # Upload session for large files
-  $sessionUrl = "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root:/$encodedPath:/createUploadSession"
+  $sessionUrl = "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root:/${encodedPath}:/createUploadSession"
   $sessionBody = @{
     item = @{
       "@microsoft.graph.conflictBehavior" = "replace"
@@ -163,3 +163,5 @@ function Upload-ToSharePoint {
     $fs.Dispose()
   }
 }
+
+
