@@ -104,229 +104,6 @@ function Get-ZoomAccessToken {
   $resp.access_token
 }
 
-function Invoke-ZoomGet {
-  param(
-    [Parameter(Mandatory)][string]$Uri,
-    [Parameter(Mandatory)][hashtable]$Headers
-  )
-  Invoke-RestMethod -Method Get -Uri $Uri -Headers $Headers
-}
-
-function Get-ZoomUsers {
-  param([Parameter(Mandatory)][hashtable]$Headers)
-
-  $users = @()
-  $nextToken = $null
-
-  do {
-    $uri = "https://api.zoom.us/v2/users?page_size=300"
-    if ($nextToken) { $uri += "&next_page_token=$nextToken" }
-
-    $resp = Invoke-ZoomGet -Uri $uri -Headers $Headers
-    if ($resp.users) { $users += $resp.users }
-    $nextToken = $resp.next_page_token
-  } while ($nextToken)
-
-  $users
-}
-
-function Get-ZoomRecordingsForUser {
-  param(
-    [Parameter(Mandatory)][string]$UserId,
-    [Parameter(Mandatory)][string]$From,
-    [Parameter(Mandatory)][string]$To,
-    [Parameter(Mandatory)][hashtable]$Headers
-  )
-
-  $meetings = @()
-  $nextToken = $null
-
-  do {
-    $uri = "https://api.zoom.us/v2/users/$UserId/recordings?from=$From&to=$To&page_size=300"
-    if ($nextToken) { $uri += "&next_page_token=$nextToken" }
-
-    $resp = Invoke-ZoomGet -Uri $uri -Headers $Headers
-    if ($resp.meetings) { $meetings += $resp.meetings }
-    $nextToken = $resp.next_page_token
-  } while ($nextToken)
-
-  $meetings
-}
-
-function Get-ZoomMeetingRecordingsDetail {
-  param(
-    [Parameter(Mandatory)][string]$MeetingId,
-    [Parameter(Mandatory)][hashtable]$Headers
-  )
-  Invoke-ZoomGet -Uri "https://api.zoom.us/v2/meetings/$MeetingId/recordings" -Headers $Headers
-}
-
-function Get-MeetingParticipantsEmails {
-  param(
-    [Parameter(Mandatory)][string]$MeetingId,
-    [Parameter(Mandatory)][hashtable]$Headers
-  )
-
-  # Zoom reports API: /report/meetings/{meetingId}/participants (requires report scopes + meeting must be in reportable window)
-  # Many will return empty -> that's OK.
-  $emails = @()
-  try {
-    $nextToken = $null
-    do {
-      $uri = "https://api.zoom.us/v2/report/meetings/$MeetingId/participants?page_size=300"
-      if ($nextToken) { $uri += "&next_page_token=$nextToken" }
-
-      $resp = Invoke-ZoomGet -Uri $uri -Headers $Headers
-      if ($resp.participants) {
-        foreach ($p in $resp.participants) {
-          if ($p.user_email) { $emails += [string]$p.user_email }
-        }
-      }
-      $nextToken = $resp.next_page_token
-    } while ($nextToken)
-  } catch {
-    # ignore
-  }
-
-  $emails
-}
-
-function Get-ExternalParticipantsLabel {
-  param(
-    [string[]]$ParticipantEmails,
-    [string]$HostEmail
-  )
-
-  $internalDomains = @()
-  if ($env:INTERNAL_DOMAINS) {
-    $internalDomains = @($env:INTERNAL_DOMAINS -split "," | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
-  }
-
-  $hostLower = if ($HostEmail) { $HostEmail.Trim().ToLower() } else { "" }
-
-  $filtered = @(
-    $ParticipantEmails |
-      ForEach-Object { $_ -as [string] } |
-      ForEach-Object { $_.Trim().ToLower() } |
-      Where-Object { $_ } |
-      Where-Object { $_ -ne $hostLower } |
-      Where-Object {
-        $parts = $_ -split "@",2
-        if ($parts.Count -ne 2) { return $true }
-        $domain = $parts[1]
-        return ($internalDomains -notcontains $domain)
-      } |
-      Sort-Object -Unique
-  )
-
-  if (-not $filtered -or $filtered.Count -eq 0) { return "unknown" }
-
-  # Keep names short for file paths
-  $joined = ($filtered -join "+")
-  if ($joined.Length -gt 60) { $joined = $joined.Substring(0,60) }
-  $joined
-}
-
-function New-SafeFileName {
-  param([Parameter(Mandatory)][string]$Name)
-  # Windows invalid: \ / : * ? " < > |
-  ($Name -replace '[\\/:*?"<>|]', '_').Trim()
-}
-
-function Truncate-FileName {
-  param(
-    [Parameter(Mandatory)][string]$FileName,
-    [int]$MaxLength = 180
-  )
-  if ($FileName.Length -le $MaxLength) { return $FileName }
-  $ext = [System.IO.Path]::GetExtension($FileName)
-  $base = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
-  $keep = $MaxLength - $ext.Length
-  if ($keep -lt 20) { $keep = 20 }
-  ($base.Substring(0,$keep) + $ext)
-}
-
-function Download-ZoomRecording {
-  param(
-    [Parameter(Mandatory)]$RecordingDetail,
-    [Parameter(Mandatory)][string]$HostEmail,
-    [Parameter(Mandatory)][string]$ParticipantsLabel,
-    [Parameter(Mandatory)][hashtable]$Headers,
-    [switch]$DryRun
-  )
-
-  $mp4 = $RecordingDetail.recording_files | Where-Object { $_.file_type -eq "MP4" } | Select-Object -First 1
-  if (-not $mp4) {
-    Write-Log "No MP4 in meeting $($RecordingDetail.id) – skipping"
-    return $null
-  }
-
-  $dt = [DateTime]$RecordingDetail.start_time
-  $topicSafe = New-SafeFileName -Name ($RecordingDetail.topic ? $RecordingDetail.topic : "Untitled")
-
-  # Unique: include meetingId + recordingFileId
-  $fileNameCore = "{0:yyyy-MM-dd HH-mm} - {1} - host_{2} - participants_{3} - {4} - {5}.mp4" -f `
-    $dt, `
-    $topicSafe, `
-    (New-SafeFileName -Name $HostEmail), `
-    (New-SafeFileName -Name $ParticipantsLabel), `
-    $RecordingDetail.id, `
-    $mp4.id
-
-  $fileName = Truncate-FileName -FileName $fileNameCore -MaxLength 180
-  $localPath = Join-Path $tmpDir $fileName
-
-  if ($DryRun) {
-    Write-Log "DRY RUN: creating stub file $fileName"
-    New-Item -ItemType File -Path $localPath -Force | Out-Null
-    Write-RunCsv -Action "dryrun_downloaded" -MeetingId "$($RecordingDetail.id)" -RecordingFileId "$($mp4.id)" -HostEmail $HostEmail -StartTimeIso $dt.ToString("s") -Topic $RecordingDetail.topic -LocalPath $localPath -SharePointPath "" -Notes "stub"
-    return $localPath
-  }
-
-  $downloadUrl = "$($mp4.download_url)?access_token=$($Headers.Authorization -replace '^Bearer\s+','')"
-  Write-Log ("Downloading MP4 ({0:N1} MB) -> {1}" -f ([double]$mp4.file_size/1MB), $fileName)
-
-  Invoke-WebRequest -Uri $downloadUrl -OutFile $localPath -UseBasicParsing
-
-  Write-RunCsv -Action "downloaded" -MeetingId "$($RecordingDetail.id)" -RecordingFileId "$($mp4.id)" -HostEmail $HostEmail -StartTimeIso $dt.ToString("s") -Topic $RecordingDetail.topic -LocalPath $localPath -SharePointPath "" -Notes ""
-  return $localPath
-}
-
-function Remove-ZoomRecording {
-  param(
-    [Parameter(Mandatory)][string]$MeetingId,
-    [Parameter(Mandatory)][hashtable]$Headers
-  )
-  # Delete all recordings for a meeting
-  Invoke-RestMethod -Method Delete -Uri "https://api.zoom.us/v2/meetings/$MeetingId/recordings?action=trash" -Headers $Headers | Out-Null
-}
-
-function Upload-RunLogsToSharePoint {
-  param(
-    [Parameter(Mandatory)][string]$GraphToken
-  )
-
-  $ts = Get-Date -Format "yyyyMMdd-HHmmss"
-  $logFolder = "$BaseFolder/_logs"
-
-  # Upload migration.log (append-style locally, overwrite latest + keep dated copy)
-  if (Test-Path -LiteralPath $LogFile) {
-    $latest = "$logFolder/migration-latest.log"
-    $dated  = "$logFolder/migration-$ts.log"
-    Upload-ToSharePoint -AccessToken $GraphToken -SiteId $SiteId -FolderPath $logFolder -LocalFilePath $LogFile | Out-Null
-    # also save dated copy (same local file, different remote name)
-    $tmpCopy = Join-Path $tmpDir ("migration-$ts.log")
-    Copy-Item -LiteralPath $LogFile -Destination $tmpCopy -Force
-    Upload-ToSharePoint -AccessToken $GraphToken -SiteId $SiteId -FolderPath $logFolder -LocalFilePath $tmpCopy | Out-Null
-    Remove-Item -LiteralPath $tmpCopy -Force -ErrorAction SilentlyContinue
-  }
-
-  # Upload run CSV (actions)
-  if (Test-Path -LiteralPath $RunCsv) {
-    Upload-ToSharePoint -AccessToken $GraphToken -SiteId $SiteId -FolderPath $logFolder -LocalFilePath $RunCsv | Out-Null
-  }
-}
-
 # ---------- MAIN ----------
 Write-Log ("=== START RUN (DRY_RUN={0}, FROM={1}, TO={2}) ===" -f $DryRun, $FromDate, $ToDate)
 
@@ -340,28 +117,15 @@ $zoomHeaders = @{ Authorization = "Bearer $zoomToken" }
 
 $graphToken = Get-GraphAccessToken -TenantId $env:GRAPH_TENANT_ID -ClientId $env:GRAPH_CLIENT_ID -ClientSecret $env:GRAPH_CLIENT_SECRET
 
-# Users + exclusions
-$excluded = @()
-if ($env:EXCLUDED_HOST_EMAILS) {
-  $excluded = @($env:EXCLUDED_HOST_EMAILS -split "," | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
-}
-
+# Users (no exclusions)
 $users = Get-ZoomUsers -Headers $zoomHeaders
 if ($env:MAX_USERS) { $users = $users | Select-Object -First ([int]$env:MAX_USERS) }
 
-$users = $users | Where-Object {
-  $e = ($_.email -as [string])
-  if (-not $e) { return $true }
-  return ($excluded -notcontains $e.Trim().ToLower())
-}
+Write-Log ("Users found: {0}" -f $users.Count)
 
-Write-Log ("Users found (after exclusions): {0}" -f $users.Count)
-
-# Walk date range in chunks
+# Process the recordings (all users)
 $start = [DateTime]::ParseExact($FromDate, "yyyy-MM-dd", $null)
 $end   = [DateTime]::ParseExact($ToDate,   "yyyy-MM-dd", $null)
-
-if ($end -lt $start) { throw "TO_DATE ($ToDate) is earlier than FROM_DATE ($FromDate)" }
 
 $totalUploaded = 0
 $totalProcessed = 0
@@ -473,12 +237,4 @@ try {
 
 Write-Log ("=== END RUN === Uploaded: {0} Processed: {1}" -f $totalUploaded, $totalProcessed)
 
-
-
-
-Exit
-
-Exit
-
-exit
 exit
