@@ -479,3 +479,5 @@ Write-Log ("=== END RUN === Uploaded: {0} Processed: {1}" -f $totalUploaded, $to
 Exit
 
 Exit
+
+exit
