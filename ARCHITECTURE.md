@@ -1,51 +1,71 @@
-﻿# Architecture
+# Architecture
 
-## Overview
-This application is a Windows PowerShell background worker that migrates Zoom cloud meeting recordings into SharePoint to reduce Zoom storage usage while preserving long-term access and searchability.
+## What this project does
+Migrates **Zoom cloud recordings older than 18 months** into **SharePoint**, using a folder structure:
 
-## Safety model (critical)
-The system uses a **two-pass architecture** to eliminate any risk of data loss.
+`TLPI Zoom Calls / YYYY / MM / DD / <recording>.mp4`
 
-Deletion from Zoom is **never** performed in the same pass as upload.
+Then (optionally) **deletes** the recording from Zoom **only after** a successful SharePoint upload.
 
----
+## Key scripts
+- **migrate.ps1**
+  - Orchestrates the run:
+    - Gets Zoom access token (Server-to-Server OAuth)
+    - Enumerates users (with exclusions)
+    - Pulls recordings in a date range
+    - Downloads MP4(s) to `.\tmp\`
+    - Uploads to SharePoint (large-file safe via upload session)
+    - Optionally deletes from Zoom
+    - Writes logs locally + uploads run logs to SharePoint
 
-## Pass 1 — Archive pass (NO DELETION)
+- **sharepoint.ps1**
+  - `Get-GraphAccessToken` (client credentials)
+  - `Upload-ToSharePoint` (SharePoint/OneDrive drive upload)
+    - Ensures folder path exists
+    - Uses **Graph upload sessions** with **chunked upload** (HttpClient) so large MP4s work reliably
 
-**Purpose**
-Ensure every Zoom recording exists in SharePoint as a single playable video file before any deletion is considered.
+- **sharepoint-auth.ps1**
+  - Helper(s) for SharePoint/Graph auth & lookup (site/drive discovery)
 
-**Behaviour**
-- Enumerate Zoom users
-- Enumerate meetings older than the retention threshold
-- Select one primary MP4 recording per meeting
-- Download locally (temporary storage)
-- Upload to SharePoint as a single video file
-- Store files under:
-  Shared Documents/TLPI Zoom Calls/YYYY/MM/DD/
-- Verify upload success (exists + size > 0)
-- Never overwrite existing files
-- Never delete from Zoom
+## SharePoint layout
+- **Base folder:** `TLPI Zoom Calls`
+- **Recordings:** `TLPI Zoom Calls/YYYY/MM/DD/*.mp4`
+- **Logs:** `TLPI Zoom Calls/_logs/`
+  - Each run produces local logs and then uploads a copy to SharePoint so the migration is auditable even when running on Render.
 
-SharePoint becomes the archive of record.
+## Logging & audit trail
+Local (repo folder):
+- `migration.log` (human-readable run log)
+- `last-run.log` (captured stdout/stderr for the last run)
 
----
+SharePoint:
+- Uploaded copies of run logs under: `TLPI Zoom Calls/_logs/`
 
-## Pass 2 — Cleanup pass (DELETION ONLY AFTER VERIFICATION)
+## Safety rules
+- **No delete unless upload succeeded**
+- Designed to be **re-runnable**:
+  - Uses unique filename elements (meeting id + recording file id) to avoid collisions
+  - SharePoint uploader supports conflict behavior (rename) when necessary
 
-**Purpose**
-Delete Zoom recordings only when SharePoint already contains a verified archived copy.
+## Runtime configuration (ENV VARS)
+Zoom:
+- `ZOOM_ACCOUNT_ID`
+- `ZOOM_CLIENT_ID`
+- `ZOOM_CLIENT_SECRET`
 
-**Behaviour**
-- Re-enumerate Zoom meetings
-- Reconstruct expected SharePoint path + filename
-- Query SharePoint directly
-- Delete from Zoom only if the file exists and is valid
-- Otherwise skip and log
+Microsoft Graph:
+- `GRAPH_TENANT_ID`
+- `GRAPH_CLIENT_ID`
+- `GRAPH_CLIENT_SECRET`
 
----
+Operational controls:
+- `DRY_RUN` = `true|false`
+- `DELETE_FROM_ZOOM` = `true|false` (only meaningful when `DRY_RUN=false`)
+- `FROM_DATE` = `YYYY-MM-DD`
+- `TO_DATE` = `YYYY-MM-DD`
+- `INTERNAL_DOMAINS` = comma list (e.g. `tlpi.co.uk,thelandlordspension.co.uk`) used to filter participants
+- `EXCLUDED_HOST_EMAILS` = comma list of host emails to skip (e.g. service/test accounts)
 
-## Guarantees
-- Zero-risk deletion
-- Fully re-runnable
-- SharePoint is always the source of truth
+## Render deployment intent
+- Run the backfill (March 2021 → cutoff at 18 months ago), then switch to scheduled runs every ~3 days.
+- Logs remain available in SharePoint under `_logs`.
