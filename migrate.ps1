@@ -370,8 +370,17 @@ $excluded = @()
 if ($env:EXCLUDED_HOST_EMAILS) {
   $excluded = @($env:EXCLUDED_HOST_EMAILS -split "," | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
 }
-$cmdGetZoomUsers = Get-Command -Name 'Get-ZoomUsers' -CommandType Function
-$users = & $cmdGetZoomUsers $zoomHeaders
+# Users: inline Zoom API call (bypasses Render parsing issues)
+$users = @()
+$nextToken = $null
+do {
+  $uri = "https://api.zoom.us/v2/users?page_size=300&status=active,inactive,pending"
+  if ($nextToken) { $uri += "&next_page_token=$nextToken" }
+
+  $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers $zoomHeaders
+  if ($resp.users) { $users += $resp.users }
+  $nextToken = $resp.next_page_token
+} while ($nextToken)
 if ($env:MAX_USERS) { $users = $users | Select-Object -First ([int]$env:MAX_USERS) }
 
 $users = $users | Where-Object {
@@ -535,6 +544,8 @@ try {
     Start-Sleep -Seconds $keep
   }
 } catch { }
+
+
 
 
 
