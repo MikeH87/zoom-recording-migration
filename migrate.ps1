@@ -1,5 +1,5 @@
 # ================================
-# Zoom Recording Migration (PROD-READY)
+# Zoom Recording Migration (RENDER-SAFE)
 # - Moves Zoom cloud recordings into SharePoint (Year/Month/Day)
 # - Uses Server-to-Server OAuth for Zoom
 # - Uses Microsoft Graph upload sessions for large files
@@ -11,16 +11,9 @@
 #   GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET
 #
 # Optional env vars:
-#   SITE_ID  (Graph Site ID) default: netorg3849094... (set below)
-#   BASE_FOLDER default: TLPI Zoom Calls
-#   FROM_DATE, TO_DATE (yyyy-MM-dd) for test runs
-#   DRY_RUN (true/false) default true
-#   DELETE_FROM_ZOOM (true/false) default false
-#   EXCLUDED_HOST_EMAILS (comma list)
-#   INTERNAL_DOMAINS (comma list) default tlpi.co.uk,thelandlordspension.co.uk
-#   CHUNK_DAYS (int) default 7
-#   MAX_USERS (int) limit user iteration (testing)
-#   MAX_RECORDINGS (int) limit total processed (testing)
+#   SITE_ID, BASE_FOLDER, FROM_DATE, TO_DATE, DRY_RUN, DELETE_FROM_ZOOM
+#   EXCLUDED_HOST_EMAILS, INTERNAL_DOMAINS, CHUNK_DAYS, MAX_USERS, MAX_RECORDINGS
+#   KEEP_ALIVE (true/false) -> if true, sleep forever at end to stop Render restart loop
 # ================================
 
 Set-StrictMode -Version Latest
@@ -105,16 +98,6 @@ function Get-ZoomAccessToken {
 }
 
 function Invoke-ZoomGet {
-
-function Encode-ZoomMeetingUuid {
-  param([Parameter(Mandatory)][string]$Uuid)
-
-  # Zoom UUIDs can contain "/" and must be URL-encoded. Some endpoints require double-encoding.
-  $once = [System.Uri]::EscapeDataString($Uuid)
-  $twice = [System.Uri]::EscapeDataString($once)
-  return $twice
-}
-
   param(
     [Parameter(Mandatory)][string]$Uri,
     [Parameter(Mandatory)][hashtable]$Headers
@@ -122,52 +105,11 @@ function Encode-ZoomMeetingUuid {
   Invoke-RestMethod -Method Get -Uri $Uri -Headers $Headers
 }
 
-function Get-ZoomUsers {
-  param([Parameter(Mandatory)][hashtable]$Headers)
-
-  $all = @()
-  foreach ($status in @("active","inactive","pending")) {
-    $nextToken = $null
-    do {
-      $uri = "https://api.zoom.us/v2/users?page_size=300&status=$status"
-      if ($nextToken) { $uri += "&next_page_token=$nextToken" }
-
-      $resp = Invoke-ZoomGet -Uri $uri -Headers $Headers
-      if ($resp.users) { $all += $resp.users }
-      $nextToken = $resp.next_page_token
-    } while ($nextToken)
-  }
-
-  # De-duplicate by user id
-  $byId = @{}
-  foreach ($u in $all) {
-    if ($u -and $u.id -and (-not $byId.ContainsKey($u.id))) { $byId[$u.id] = $u }
-  }
-
-  return $byId.Values
-}
-
-function Get-ZoomRecordingsForUser {
-  param(
-    [Parameter(Mandatory)][string]$UserId,
-    [Parameter(Mandatory)][string]$From,
-    [Parameter(Mandatory)][string]$To,
-    [Parameter(Mandatory)][hashtable]$Headers
-  )
-
-  $meetings = @()
-  $nextToken = $null
-
-  do {
-    $uri = "https://api.zoom.us/v2/users/$UserId/recordings?from=$From&to=$To&page_size=300"
-    if ($nextToken) { $uri += "&next_page_token=$nextToken" }
-
-    $resp = Invoke-ZoomGet -Uri $uri -Headers $Headers
-    if ($resp.meetings) { $meetings += $resp.meetings }
-    $nextToken = $resp.next_page_token
-  } while ($nextToken)
-
-  $meetings
+function Encode-ZoomMeetingUuid {
+  param([Parameter(Mandatory)][string]$Uuid)
+  # Zoom UUIDs can contain / and = etc, and some endpoints require double-URL-encoding.
+  $once = [System.Uri]::EscapeDataString($Uuid)
+  [System.Uri]::EscapeDataString($once)
 }
 
 function Get-ZoomMeetingRecordingsDetail {
@@ -185,8 +127,6 @@ function Get-MeetingParticipantsEmails {
     [Parameter(Mandatory)][hashtable]$Headers
   )
 
-  # Zoom reports API: /report/meetings/{meetingId}/participants (requires report scopes + meeting must be in reportable window)
-  # Many will return empty -> that's OK.
   $emails = @()
   try {
     $nextToken = $null
@@ -239,7 +179,6 @@ function Get-ExternalParticipantsLabel {
 
   if (-not $filtered -or $filtered.Count -eq 0) { return "unknown" }
 
-  # Keep names short for file paths
   $joined = ($filtered -join "+")
   if ($joined.Length -gt 60) { $joined = $joined.Substring(0,60) }
   $joined
@@ -251,7 +190,7 @@ function New-SafeFileName {
   # SharePoint/OneDrive are stricter than Windows. In particular, # and % often cause Graph path errors.
   $safe = ($Name -replace '[\\/:*?"<>|#%]', '_').Trim()
 
-  # Also avoid trailing dots/spaces which SharePoint rejects
+  # Avoid trailing dots/spaces (SharePoint rejects)
   $safe = $safe.TrimEnd(' ','.')
 
   if ([string]::IsNullOrWhiteSpace($safe)) { $safe = "Untitled" }
@@ -282,14 +221,13 @@ function Download-ZoomRecording {
 
   $mp4 = $RecordingDetail.recording_files | Where-Object { $_.file_type -eq "MP4" } | Select-Object -First 1
   if (-not $mp4) {
-    Write-Log "No MP4 in meeting $($RecordingDetail.id) ÔÇô skipping"
+    Write-Log "No MP4 in meeting $($RecordingDetail.id) – skipping"
     return $null
   }
 
   $dt = [DateTime]$RecordingDetail.start_time
   $topicSafe = New-SafeFileName -Name ($RecordingDetail.topic ? $RecordingDetail.topic : "Untitled")
 
-  # Unique: include meetingId + recordingFileId
   $fileNameCore = "{0:yyyy-MM-dd HH-mm} - {1} - host_{2} - participants_{3} - {4} - {5}.mp4" -f `
     $dt, `
     $topicSafe, `
@@ -334,19 +272,14 @@ function Upload-RunLogsToSharePoint {
   $ts = Get-Date -Format "yyyyMMdd-HHmmss"
   $logFolder = "$BaseFolder/_logs"
 
-  # Upload migration.log (append-style locally, overwrite latest + keep dated copy)
   if (Test-Path -LiteralPath $LogFile) {
-    $latest = "$logFolder/migration-latest.log"
-    $dated  = "$logFolder/migration-$ts.log"
     Upload-ToSharePoint -AccessToken $GraphToken -SiteId $SiteId -FolderPath $logFolder -LocalFilePath $LogFile | Out-Null
-    # also save dated copy (same local file, different remote name)
     $tmpCopy = Join-Path $tmpDir ("migration-$ts.log")
     Copy-Item -LiteralPath $LogFile -Destination $tmpCopy -Force
     Upload-ToSharePoint -AccessToken $GraphToken -SiteId $SiteId -FolderPath $logFolder -LocalFilePath $tmpCopy | Out-Null
     Remove-Item -LiteralPath $tmpCopy -Force -ErrorAction SilentlyContinue
   }
 
-  # Upload run CSV (actions)
   if (Test-Path -LiteralPath $RunCsv) {
     Upload-ToSharePoint -AccessToken $GraphToken -SiteId $SiteId -FolderPath $logFolder -LocalFilePath $RunCsv | Out-Null
   }
@@ -355,7 +288,6 @@ function Upload-RunLogsToSharePoint {
 # ---------- MAIN ----------
 Write-Log ("=== START RUN (DRY_RUN={0}, FROM={1}, TO={2}) ===" -f $DryRun, $FromDate, $ToDate)
 
-# Validate env
 foreach ($v in "ZOOM_ACCOUNT_ID","ZOOM_CLIENT_ID","ZOOM_CLIENT_SECRET","GRAPH_TENANT_ID","GRAPH_CLIENT_ID","GRAPH_CLIENT_SECRET") {
   if (-not [Environment]::GetEnvironmentVariable($v)) { throw "Missing env var: $v" }
 }
@@ -370,6 +302,7 @@ $excluded = @()
 if ($env:EXCLUDED_HOST_EMAILS) {
   $excluded = @($env:EXCLUDED_HOST_EMAILS -split "," | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
 }
+
 # Users: inline Zoom API call (bypasses Render parsing issues)
 $users = @()
 $nextToken = $null
@@ -377,10 +310,11 @@ do {
   $uri = "https://api.zoom.us/v2/users?page_size=300&status=active,inactive,pending"
   if ($nextToken) { $uri += "&next_page_token=$nextToken" }
 
-  $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers $zoomHeaders
+  $resp = Invoke-ZoomGet -Uri $uri -Headers $zoomHeaders
   if ($resp.users) { $users += $resp.users }
   $nextToken = $resp.next_page_token
 } while ($nextToken)
+
 if ($env:MAX_USERS) { $users = $users | Select-Object -First ([int]$env:MAX_USERS) }
 
 $users = $users | Where-Object {
@@ -394,12 +328,12 @@ Write-Log ("Users found (after exclusions): {0}" -f $users.Count)
 # Walk date range in chunks
 $start = [DateTime]::ParseExact($FromDate, "yyyy-MM-dd", $null)
 $end   = [DateTime]::ParseExact($ToDate,   "yyyy-MM-dd", $null)
-
 if ($end -lt $start) { throw "TO_DATE ($ToDate) is earlier than FROM_DATE ($FromDate)" }
 
 $totalUploaded = 0
-$totalProcessed = 0
+$totalProcessed = 0
 $processedUuids = [System.Collections.Generic.HashSet[string]]::new()
+
 $maxRecordings = if ($env:MAX_RECORDINGS) { [int]$env:MAX_RECORDINGS } else { 0 }
 
 $cursor = $start
@@ -416,33 +350,38 @@ while ($cursor -le $end) {
     $hostEmail = ($u.email -as [string])
     if (-not $hostEmail) { $hostEmail = "unknown" }
 
+    # Recordings list: inline Zoom API call (bypasses Render parsing issues)
     $meetings = @()
-    try {
-      $meetings = Get-ZoomRecordingsForUser -UserId $u.id -From $fromStr -To $toStr -Headers $zoomHeaders
-      # De-dupe: Zoom can return duplicate meeting instances; uuid is the stable unique key
-      $meetings = @($meetings | Where-Object { $_ -and $_.uuid } | Sort-Object uuid -Unique)
-    } catch {
-      Write-Log "WARN: failed recordings list for user $($u.id) ($hostEmail): $($_.Exception.Message)"
-      continue
-    }
+    $nextToken2 = $null
+    do {
+      $uri2 = "https://api.zoom.us/v2/users/$($u.id)/recordings?from=$fromStr&to=$toStr&page_size=300"
+      if ($nextToken2) { $uri2 += "&next_page_token=$nextToken2" }
 
-    foreach ($m in $meetings) {
+      $resp2 = Invoke-ZoomGet -Uri $uri2 -Headers $zoomHeaders
+      if ($resp2.meetings) { $meetings += $resp2.meetings }
+      $nextToken2 = $resp2.next_page_token
+    } while ($nextToken2)
+
+    # De-dupe: Zoom can return duplicate meeting instances; uuid is the stable unique key
+    $meetings = @($meetings | Where-Object { $_ -and $_.uuid } | Sort-Object uuid -Unique)
+
+    foreach ($m in $meetings) {
+      if ($maxRecordings -gt 0 -and $totalProcessed -ge $maxRecordings) { break }
+
       if (-not $m.uuid) { continue }
       if (-not $processedUuids.Add([string]$m.uuid)) {
         Write-Log ("SKIP (duplicate uuid): {0} (host: {1})" -f $m.uuid, $hostEmail)
         Write-RunCsv -Action "skipped" -MeetingId "$($m.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso "" -Topic ($m.topic) -LocalPath "" -SharePointPath "" -Notes "duplicate_uuid"
         continue
       }
-      if ($maxRecordings -gt 0 -and $totalProcessed -ge $maxRecordings) { break }
 
       $totalProcessed++
 
-      # Get full recording detail (includes recording_files)
       $full = $null
       try {
         $full = Get-ZoomMeetingRecordingsDetail -MeetingUuid $m.uuid -Headers $zoomHeaders
       } catch {
-        Write-Log "WARN: failed to fetch meeting recordings detail for $($m.id): $($_.Exception.Message)"
+        Write-Log "WARN: failed to fetch meeting recordings detail for $($m.id) uuid=$($m.uuid): $($_.Exception.Message)"
         Write-RunCsv -Action "error" -MeetingId "$($m.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso "" -Topic ($m.topic) -LocalPath "" -SharePointPath "" -Notes "detail_fetch_failed"
         continue
       }
@@ -451,12 +390,13 @@ while ($cursor -le $end) {
 
       $dt = [DateTime]$full.start_time
 
-# Guard: enforce date window (protects against Zoom returning other instances for the same meeting)
-if ($dt -lt $start -or $dt -gt $end) {
-  Write-Log ("SKIP (outside range): {0} [{1}] (host: {2})" -f $full.topic, $dt.ToString("yyyy-MM-dd HH:mm"), $hostEmail)
-  Write-RunCsv -Action "skipped" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath "" -SharePointPath "" -Notes "outside_date_window"
-  continue
-}
+      # Hard guard: skip anything outside the requested global date range
+      if ($dt -lt $start -or $dt -gt $end.AddDays(1).AddSeconds(-1)) {
+        Write-Log ("SKIP (outside range): {0} [{1}] (host: {2})" -f $full.topic, $dt.ToString("yyyy-MM-dd HH:mm"), $hostEmail)
+        Write-RunCsv -Action "skipped" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath "" -SharePointPath "" -Notes "outside_range"
+        continue
+      }
+
       Write-Log ("Processing: {0} [{1}] (host: {2})" -f $full.topic, $dt.ToString("yyyy-MM-dd HH:mm"), $hostEmail)
 
       $participants = @()
@@ -493,10 +433,10 @@ if ($dt -lt $start -or $dt -gt $end) {
         if (-not $DryRun -and $DeleteFromZoom) {
           try {
             Remove-ZoomRecording -MeetingUuid $m.uuid -Headers $zoomHeaders
-            Write-Log "Deleted from Zoom: meeting $($full.id)"
+            Write-Log "Deleted from Zoom: meeting uuid=$($m.uuid)"
             Write-RunCsv -Action "deleted" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath $localFile -SharePointPath $folderPath -Notes ""
           } catch {
-            Write-Log "ERROR: failed to delete from Zoom meeting $($full.id): $($_.Exception.Message)"
+            Write-Log "ERROR: failed to delete from Zoom meeting uuid=$($m.uuid): $($_.Exception.Message)"
             Write-RunCsv -Action "error" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath $localFile -SharePointPath $folderPath -Notes "delete_failed"
           }
         }
@@ -504,8 +444,6 @@ if ($dt -lt $start -or $dt -gt $end) {
         Write-Log "UPLOAD FAILED: $localFile"
         Write-RunCsv -Action "error" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath $localFile -SharePointPath $folderPath -Notes "upload_returned_false"
       }
-
-      # keep tmp files for now; you can clean later if needed
     }
   }
 
@@ -513,7 +451,6 @@ if ($dt -lt $start -or $dt -gt $end) {
   $cursor = $chunkEnd.AddDays(1)
 }
 
-# Upload logs to SharePoint (always; helps Render runs)
 try {
   Upload-RunLogsToSharePoint -GraphToken $graphToken
   Write-Log "Uploaded run logs to SharePoint: $BaseFolder/_logs"
@@ -523,33 +460,9 @@ try {
 
 Write-Log ("=== END RUN === Uploaded: {0} Processed: {1}" -f $totalUploaded, $totalProcessed)
 
+if ($env:KEEP_ALIVE -and $env:KEEP_ALIVE.ToLower() -eq "true") {
+  Write-Log "KEEP_ALIVE=true -> sleeping forever to stop Render restart loop"
+  while ($true) { Start-Sleep -Seconds 3600 }
+}
 
-
-
-Exit
-
-Exit
-
-exit
-exit
-
-
-# --- Render keep-alive to prevent rapid restart loops on Web Services ---
-try {
-  $keep = 0
-  if ($env:KEEP_ALIVE_SECONDS) { $keep = [int]$env:KEEP_ALIVE_SECONDS }
-  elseif ($env:RENDER -or $env:RENDER_SERVICE_ID) { $keep = 600 }
-  if ($keep -gt 0) {
-    Write-Log "Run complete. Sleeping for $keep seconds to prevent Render restart loop (set KEEP_ALIVE_SECONDS=0 to disable)."
-    Start-Sleep -Seconds $keep
-  }
-} catch { }
-
-
-
-
-
-
-
-
-
+exit 0
