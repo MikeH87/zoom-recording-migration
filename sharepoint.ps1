@@ -1,10 +1,3 @@
-
-  # Ensure destination folder exists (Year/Month/Day)
-  if ($FolderPath) {
-    Ensure-SpFolderPath -AccessToken $AccessToken -SiteId $SiteId -FolderPath $FolderPath
-  }
-
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -151,6 +144,12 @@ function Upload-ToSharePoint {
   }
 
   # Upload session for large files
+
+  # Ensure destination folder exists (Year/Month/Day)
+  if ($FolderPath) {
+    Ensure-SpFolderPath -AccessToken $AccessToken -SiteId $SiteId -FolderPath $FolderPath
+  }
+
   $sessionUrl = "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root:/${encodedPath}:/createUploadSession"
   $sessionBody = @{
     item = @{
