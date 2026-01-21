@@ -343,7 +343,87 @@ while ($cursor -le $end) {
   $fromStr = $cursor.ToString("yyyy-MM-dd")
   $toStr   = $chunkEnd.ToString("yyyy-MM-dd")
 
-  foreach ($u in $users) {
+      # --- Account-level recordings sweep (captures recordings for removed users) ---
+    # Requires S2S app scopes that allow account recordings listing.
+    $acctMeetings = @()
+    try {
+      $nextAcct = $null
+      do {
+        $aUri = "https://api.zoom.us/v2/accounts/$($env:ZOOM_ACCOUNT_ID)/recordings?from=$fromStr&to=$toStr&page_size=300"
+        if ($nextAcct) { $aUri += "&next_page_token=$nextAcct" }
+        $aResp = Invoke-ZoomGet -Uri $aUri -Headers $zoomHeaders
+        if ($aResp.meetings) { $acctMeetings += $aResp.meetings }
+        $nextAcct = $aResp.next_page_token
+      } while ($nextAcct)
+    } catch {
+      Write-Log ("WARN: account recordings sweep failed for {0}..{1}: {2}" -f $fromStr, $toStr, $_.Exception.Message)
+      $acctMeetings = @()
+    }
+
+    $acctMeetings = @($acctMeetings | Where-Object { $_ -and $_.uuid } | Sort-Object uuid -Unique)
+
+    foreach ($m in $acctMeetings) {
+      if ($maxRecordings -gt 0 -and $totalProcessed -ge $maxRecordings) { break }
+
+      if (-not $m.uuid) { continue }
+      if (-not $processedUuids.Add([string]$m.uuid)) { continue }
+
+      $totalProcessed++
+
+      $hostEmail = "unknown"
+      try {
+        if ($m.host_email) { $hostEmail = [string]$m.host_email }
+      } catch {}
+
+      $full = $null
+      try {
+        $full = Get-ZoomMeetingRecordingsDetail -MeetingUuid $m.uuid -Headers $zoomHeaders
+      } catch {
+        Write-Log "WARN: failed to fetch meeting recordings detail for uuid=$($m.uuid): $($_.Exception.Message)"
+        Write-RunCsv -Action "error" -MeetingId "$($m.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso "" -Topic ($m.topic) -LocalPath "" -SharePointPath "" -Notes "detail_fetch_failed_account_sweep"
+        continue
+      }
+
+      if (-not $full -or -not $full.start_time) { continue }
+      $dt = [DateTime]$full.start_time
+
+      if ($dt -lt $start -or $dt -gt $end.AddDays(1).AddSeconds(-1)) { continue }
+
+      Write-Log ("Processing: {0} [{1}] (host: {2})" -f $full.topic, $dt.ToString("yyyy-MM-dd HH:mm"), $hostEmail)
+
+      $participants = @()
+      try { $participants = Get-MeetingParticipantsEmails -MeetingId "$($full.id)" -Headers $zoomHeaders } catch { $participants = @() }
+      $participantsLabel = Get-ExternalParticipantsLabel -ParticipantEmails $participants -HostEmail $hostEmail
+
+      $localFile = $null
+      try {
+        $localFile = Download-ZoomRecording -RecordingDetail $full -HostEmail $hostEmail -ParticipantsLabel $participantsLabel -Headers $zoomHeaders -DryRun:$DryRun
+      } catch {
+        Write-Log "ERROR: download failed for meeting $($full.id): $($_.Exception.Message)"
+        Write-RunCsv -Action "error" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath "" -SharePointPath "" -Notes "download_failed_account_sweep"
+        continue
+      }
+
+      if (-not $localFile) { continue }
+
+      $folderPath = "{0}/{1}/{2}/{3}" -f $BaseFolder, $dt.Year, $dt.Month.ToString("00"), $dt.Day.ToString("00")
+
+      $ok = $false
+      try {
+        $ok = Upload-ToSharePoint -AccessToken $graphToken -SiteId $SiteId -FolderPath $folderPath -LocalFilePath $localFile
+      } catch {
+        Write-Log "ERROR: SharePoint upload failed for ${localFile}: $($_.Exception.Message)"
+        Write-RunCsv -Action "error" -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath $localFile -SharePointPath $folderPath -Notes "upload_failed_account_sweep"
+        continue
+      }
+
+      if ($ok) {
+        $totalUploaded++
+        Write-Log "Uploaded OK: $localFile -> $folderPath"
+        Write-RunCsv -Action ($DryRun ? "dryrun_uploaded" : "uploaded") -MeetingId "$($full.id)" -RecordingFileId "" -HostEmail $hostEmail -StartTimeIso $dt.ToString("s") -Topic $full.topic -LocalPath $localFile -SharePointPath $folderPath -Notes "account_sweep"
+      }
+    }
+foreach ($u in $users) {
     if ($maxRecordings -gt 0 -and $totalProcessed -ge $maxRecordings) { break }
 
     $hostEmail = ($u.email -as [string])
