@@ -221,7 +221,7 @@ function Download-ZoomRecording {
 
   $mp4 = $RecordingDetail.recording_files | Where-Object { $_.file_type -eq "MP4" } | Select-Object -First 1
   if (-not $mp4) {
-    Write-Log "No MP4 in meeting $($RecordingDetail.id) â€“ skipping"
+    Write-Log "No MP4 in meeting $($RecordingDetail.id) - skipping"
     return $null
   }
 
@@ -246,7 +246,7 @@ function Download-ZoomRecording {
   }
 
   $downloadUrl = "$($mp4.download_url)?access_token=$($Headers.Authorization -replace '^Bearer\s+','')"
-  Write-Log ("Downloading MP4 ({0:N1} MB) -> {1}" -f ([double]$mp4.file_size/1MB), $fileName)
+  Write-Log ('Downloading MP4 ({0:N1} MB) -> {1}' -f ([double]$mp4.file_size/1MB), $fileName)
 
   Invoke-WebRequest -Uri $downloadUrl -OutFile $localPath -UseBasicParsing
 
