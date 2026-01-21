@@ -221,22 +221,21 @@ function Download-ZoomRecording {
 
   $mp4 = $RecordingDetail.recording_files | Where-Object { $_.file_type -eq "MP4" } | Select-Object -First 1
   if (-not $mp4) {
-    Write-Log "No MP4 in meeting $($RecordingDetail.id) – skipping"
+    Write-Log "No MP4 in meeting $($RecordingDetail.id) â€“ skipping"
     return $null
   }
 
   $dt = [DateTime]$RecordingDetail.start_time
   $topicSafe = New-SafeFileName -Name ($RecordingDetail.topic ? $RecordingDetail.topic : "Untitled")
 
-  $fileNameCore = "{0:yyyy-MM-dd HH-mm} - {1} - host_{2} - participants_{3} - {4} - {5}.mp4" -f `
+  $fileNameCore = "{0:yyyy-MM-dd HH-mm} - {1} - {2} - {3}.mp4" -f `
     $dt, `
     $topicSafe, `
-    (New-SafeFileName -Name $HostEmail), `
-    (New-SafeFileName -Name $ParticipantsLabel), `
     $RecordingDetail.id, `
     $mp4.id
 
-  $fileName = Truncate-FileName -FileName $fileNameCore -MaxLength 180
+  # Keep names shorter to stay well within Graph/SharePoint path constraints
+  $fileName = Truncate-FileName -FileName $fileNameCore -MaxLength 140
   $localPath = Join-Path $tmpDir $fileName
 
   if ($DryRun) {

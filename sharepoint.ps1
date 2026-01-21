@@ -1,3 +1,10 @@
+
+  # Ensure destination folder exists (Year/Month/Day)
+  if ($FolderPath) {
+    Ensure-SpFolderPath -AccessToken $AccessToken -SiteId $SiteId -FolderPath $FolderPath
+  }
+
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -58,6 +65,46 @@ function Encode-GraphPath {
   $segments = $p -split '/'
   $encoded = $segments | ForEach-Object { [System.Uri]::EscapeDataString($_) }
   return ($encoded -join '/')
+}
+
+
+function Ensure-SpFolderPath {
+  param(
+    [Parameter(Mandatory)][string]$AccessToken,
+    [Parameter(Mandatory)][string]$SiteId,
+    [Parameter(Mandatory)][string]$FolderPath
+  )
+
+  $headers = @{ Authorization = "Bearer $AccessToken"; "Content-Type" = "application/json" }
+  $p = ($FolderPath -replace '\\','/').Trim('/')
+  if (-not $p) { return }
+
+  $parts = @($p -split '/' | Where-Object { $_ })
+  $current = ""
+
+  foreach ($part in $parts) {
+    $parent = $current
+    $current = if ($current) { "$current/$part" } else { $part }
+
+    $childrenUrl = if ($parent) {
+      $encodedParent = Encode-GraphPath -Path $parent
+      "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root:/$encodedParent:/children"
+    } else {
+      "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root/children"
+    }
+
+    $body = @{
+      name = $part
+      folder = @{}
+      "@microsoft.graph.conflictBehavior" = "replace"
+    } | ConvertTo-Json -Depth 5
+
+    try {
+      Invoke-RestMethod -Method Post -Uri $childrenUrl -Headers $headers -Body $body | Out-Null
+    } catch {
+      # Ignore benign errors; upload will fail later if path truly invalid
+    }
+  }
 }
 
 function Upload-ToSharePoint {
