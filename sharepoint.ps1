@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 function Get-GraphAccessToken {
@@ -81,7 +81,7 @@ function Ensure-SpFolderPath {
 
     $childrenUrl = if ($parent) {
       $encodedParent = Encode-GraphPath -Path $parent
-      "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root:/$encodedParent:/children"
+      "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root:/${encodedParent}:/children"
     } else {
       "https://graph.microsoft.com/v1.0/sites/$SiteId/drive/root/children"
     }
@@ -209,5 +209,6 @@ function Upload-ToSharePoint {
     $fs.Dispose()
   }
 }
+
 
 
