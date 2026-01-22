@@ -349,7 +349,7 @@ while ($cursor -le $end) {
     try {
       $nextAcct = $null
       do {
-        $aUri = "https://api.zoom.us/v2/accounts/$($env:ZOOM_ACCOUNT_ID)/recordings?from=$fromStr&to=$toStr&page_size=300"
+        $aUri = "https://api.zoom.us/v2/report/cloud_recording?from=$fromStr&to=$toStr&page_size=300"
         if ($nextAcct) { $aUri += "&next_page_token=$nextAcct" }
         $aResp = Invoke-ZoomGet -Uri $aUri -Headers $zoomHeaders
         if ($aResp.meetings) { $acctMeetings += $aResp.meetings }
