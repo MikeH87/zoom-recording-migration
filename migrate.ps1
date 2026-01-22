@@ -102,7 +102,21 @@ function Invoke-ZoomGet {
     [Parameter(Mandatory)][string]$Uri,
     [Parameter(Mandatory)][hashtable]$Headers
   )
-  Invoke-RestMethod -Method Get -Uri $Uri -Headers $Headers
+
+  try {
+    return Invoke-RestMethod -Method Get -Uri $Uri -Headers $Headers
+  } catch {
+    $msg = $_.Exception.Message
+    try {
+      $resp = $_.Exception.Response
+      if ($resp -and $resp.GetResponseStream()) {
+        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $body = $sr.ReadToEnd()
+        if ($body) { $msg = "$msg | body: $body" }
+      }
+    } catch { }
+    throw $msg
+  }
 }
 
 function Encode-ZoomMeetingUuid {
@@ -294,6 +308,22 @@ foreach ($v in "ZOOM_ACCOUNT_ID","ZOOM_CLIENT_ID","ZOOM_CLIENT_SECRET","GRAPH_TE
 $zoomToken = Get-ZoomAccessToken -AccountId $env:ZOOM_ACCOUNT_ID -ClientId $env:ZOOM_CLIENT_ID -ClientSecret $env:ZOOM_CLIENT_SECRET
 $zoomHeaders = @{ Authorization = "Bearer $zoomToken" }
 
+# Prefer an explicit env var if provided (lets you override easily)
+$ZoomApiAccountId = $env:ZOOM_API_ACCOUNT_ID
+
+# Otherwise, ask Zoom what account id it expects for /accounts/{accountId}/... endpoints
+if (-not $ZoomApiAccountId) {
+  try {
+    $acctMe = Invoke-ZoomGet -Uri "https://api.zoom.us/v2/accounts/me" -Headers $zoomHeaders
+    if ($acctMe -and $acctMe.id) { $ZoomApiAccountId = [string]$acctMe.id }
+  } catch {
+    Write-Log ("WARN: could not resolve ZoomApiAccountId via /accounts/me: {0}" -f $_.Exception.Message)
+  }
+}
+
+# Fallback (may still work on some accounts, but /accounts/me is preferred)
+if (-not $ZoomApiAccountId) { $ZoomApiAccountId = $env:ZOOM_ACCOUNT_ID }
+
 $graphToken = Get-GraphAccessToken -TenantId $env:GRAPH_TENANT_ID -ClientId $env:GRAPH_CLIENT_ID -ClientSecret $env:GRAPH_CLIENT_SECRET
 
 # Users + exclusions
@@ -349,7 +379,7 @@ while ($cursor -le $end) {
     try {
       $nextAcct = $null
       do {
-        $aUri = "https://api.zoom.us/v2/report/cloud_recording?from=$fromStr&to=$toStr&page_size=300"
+        $aUri = "https://api.zoom.us/v2/accounts/$ZoomApiAccountId/recordings?from=$fromStr&to=$toStr&page_size=300"
         if ($nextAcct) { $aUri += "&next_page_token=$nextAcct" }
         $aResp = Invoke-ZoomGet -Uri $aUri -Headers $zoomHeaders
         if ($aResp.meetings) { $acctMeetings += $aResp.meetings }
